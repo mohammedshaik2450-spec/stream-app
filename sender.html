@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>Stream Sender</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { background:#1a1a2e; color:#fff; font-family:sans-serif; min-height:100vh; display:flex; flex-direction:column; align-items:center; padding:20px; }
+    h1 { font-size:24px; margin:20px 0 10px; }
+    .status { padding:10px 20px; background:#16213e; border-radius:20px; margin:15px 0; font-size:14px; display:flex; align-items:center; gap:8px; }
+    .dot { width:10px; height:10px; border-radius:50%; background:#666; }
+    .dot.green { background:#4ecca3; }
+    .dot.red { background:#e94560; }
+    .dot.pulse { animation:pulse 1.5s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+    video { width:100%; max-width:400px; border-radius:12px; background:#000; margin:15px 0; }
+    button { padding:16px; border:none; border-radius:12px; font-size:16px; font-weight:bold; color:#fff; background:#e94560; width:100%; max-width:300px; margin:10px 0; cursor:pointer; }
+    button:disabled { opacity:0.5; }
+    .info { color:#8888aa; font-size:13px; text-align:center; margin:10px 0; }
+  </style>
+</head>
+<body>
+  <h1>📡 Stream Sender</h1>
+  <div class="status"><div class="dot pulse" id="dot"></div><span id="statusText">Starting...</span></div>
+  <video id="localVideo" autoplay muted playsinline></video>
+  <button id="startBtn" onclick="startStreaming()">🎤 Start Sending</button>
+  <button id="stopBtn" onclick="stopStreaming()" style="display:none; background:#333;">⏹ Stop</button>
+  <p class="info">Keep this tab open to keep streaming.<br>Android will auto-share mic & camera.</p>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    let socket, localStream, peerConn;
+    const ICE = { iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' }
+    ]};
+
+    function setStatus(text, color) {
+      document.getElementById('statusText').textContent = text;
+      const dot = document.getElementById('dot');
+      dot.className = 'dot pulse ' + (color || '');
+    }
+
+    async function startStreaming() {
+      try {
+        // Request mic + camera
+        localStream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true },
+          video: { facingMode: 'environment', width: 640, height: 480 }
+        });
+        document.getElementById('localVideo').srcObject = localStream;
+        document.getElementById('startBtn').style.display = 'none';
+        document.getElementById('stopBtn').style.display = 'block';
+        setStatus('🎤 Mic & Camera active', 'green');
+
+        // Connect to server
+        socket = io();
+        socket.on('connect', () => {
+          socket.emit('join-sender');
+          setStatus('📡 Waiting for iOS receiver...', 'pulse');
+        });
+
+        socket.on('receiver-offline', () => setStatus('📱 Receiver disconnected', 'red'));
+        socket.on('offer', handleOffer);
+        socket.on('answer', handleAnswer);
+        socket.on('ice', handleIce);
+      } catch (err) {
+        alert('Please allow Microphone & Camera permissions!');
+        console.error(err);
+      }
+    }
+
+    function setupPeerConnection() {
+      peerConn = new RTCPeerConnection(ICE);
+      localStream.getTracks().forEach(t => peerConn.addTrack(t, localStream));
+
+      peerConn.onicecandidate = e => {
+        if (e.candidate && socket) socket.emit('ice', { targetId: 'receiver', candidate: e.candidate });
+      };
+    }
+
+    async function handleOffer(data) {
+      setupPeerConnection();
+      await peerConn.setRemoteDescription(new RTCSessionDescription(data.offer));
+      const answer = await peerConn.createAnswer();
+      await peerConn.setLocalDescription(answer);
+      socket.emit('answer', { senderId: socket.id, answer });
+    }
+
+    async function handleAnswer(data) {
+      if (peerConn) await peerConn.setRemoteDescription(new RTCSessionDescription(data.answer));
+      setStatus('🔴 LIVE - Streaming to iOS', 'green');
+    }
+
+    function handleIce(data) {
+      if (peerConn) peerConn.addIceCandidate(new RTCIceCandidate(data.candidate));
+    }
+
+    function stopStreaming() {
+      if (localStream) localStream.getTracks().forEach(t => t.stop());
+      if (socket) socket.disconnect();
+      if (peerConn) peerConn.close();
+      location.reload();
+    }
+  </script>
+</body>
+</html>

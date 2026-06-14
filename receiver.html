@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>Stream Receiver</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { background:#1a1a2e; color:#fff; font-family:-apple-system,sans-serif; min-height:100vh; display:flex; flex-direction:column; align-items:center; padding:20px; }
+    h1 { font-size:24px; margin:20px 0 10px; }
+    .status { padding:10px 20px; background:#16213e; border-radius:20px; margin:15px 0; font-size:14px; display:flex; align-items:center; gap:8px; }
+    .dot { width:10px; height:10px; border-radius:50%; background:#666; }
+    .dot.green { background:#4ecca3; }
+    .dot.red { background:#e94560; }
+    .dot.pulse { animation:pulse 1.5s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+    video { width:100%; max-width:400px; border-radius:12px; background:#000; margin:15px 0; }
+    .audio-only { width:120px; height:120px; border-radius:50%; background:#16213e; display:flex; align-items:center; justify-content:center; font-size:50px; margin:30px 0; border:3px solid #e94560; animation:pulse 2s infinite; }
+    .info { color:#8888aa; font-size:13px; text-align:center; margin:10px 0; }
+  </style>
+</head>
+<body>
+  <h1>🎧 Stream Receiver</h1>
+  <div class="status"><div class="dot pulse" id="dot"></div><span id="statusText">Connecting...</span></div>
+  <video id="remoteVideo" autoplay playsinline></video>
+  <div id="audioBox" class="audio-only" style="display:none">🔊</div>
+  <p class="info" id="infoText">Waiting for Android to connect...</p>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    let socket, peerConn;
+    const ICE = { iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' }
+    ]};
+
+    function setStatus(text, color) {
+      document.getElementById('statusText').textContent = text;
+      document.getElementById('dot').className = 'dot pulse ' + (color || '');
+    }
+
+    socket = io();
+    socket.on('connect', () => {
+      socket.emit('join-receiver');
+      setStatus('🌐 Connected to server', 'green');
+    });
+    socket.on('disconnect', () => setStatus('🔌 Disconnected', 'red'));
+    socket.on('waiting', d => setStatus(d.message, 'pulse'));
+    socket.on('sender-ready', async d => {
+      setStatus('📡 Android is online!', 'green');
+      document.getElementById('infoText').textContent = 'Establishing direct connection...';
+      await setupWebRTC(d.senderId);
+    });
+    socket.on('sender-offline', () => {
+      setStatus('📱 Android offline', 'red');
+      document.getElementById('remoteVideo').style.display = 'none';
+      document.getElementById('audioBox').style.display = 'flex';
+      document.getElementById('infoText').textContent = 'Waiting for Android...';
+    });
+    socket.on('offer', handleOffer);
+    socket.on('answer', handleAnswer);
+    socket.on('ice', handleIce);
+
+    async function setupWebRTC(senderId) {
+      peerConn = new RTCPeerConnection(ICE);
+      peerConn.onicecandidate = e => {
+        if (e.candidate) socket.emit('ice', { targetId: senderId, candidate: e.candidate });
+      };
+      peerConn.ontrack = e => {
+        const video = document.getElementById('remoteVideo');
+        if (!video.srcObject) video.srcObject = e.streams[0];
+        if (e.track.kind === 'video') {
+          video.style.display = 'block';
+          document.getElementById('audioBox').style.display = 'none';
+          setStatus('🔴 Live video + audio', 'green');
+        } else if (e.track.kind === 'audio') {
+          document.getElementById('audioBox').style.display = 'flex';
+          setStatus('🔴 Live audio', 'green');
+        }
+        document.getElementById('infoText').textContent = 'Receiving live stream';
+      };
+    }
+
+    async function handleOffer(data) {
+      if (!peerConn) await setupWebRTC(data.from);
+      await peerConn.setRemoteDescription(new RTCSessionDescription(data.offer));
+      const answer = await peerConn.createAnswer();
+      await peerConn.setLocalDescription(answer);
+      socket.emit('answer', { senderId: data.from, answer });
+    }
+
+    async function handleAnswer(data) {
+      if (peerConn) {
+        await peerConn.setRemoteDescription(new RTCSessionDescription(data.answer));
+        setStatus('🔴 LIVE - Receiving stream', 'green');
+      }
+    }
+
+    function handleIce(data) {
+      if (peerConn) peerConn.addIceCandidate(new RTCIceCandidate(data.candidate));
+    }
+  </script>
+</body>
+</html>
